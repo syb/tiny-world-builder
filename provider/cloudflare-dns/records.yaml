@@ -1,23 +1,23 @@
 # provider/cloudflare-dns — declarative manifest
-# CalVer: 2026-07-22  SemVer: 1.1.0
+# CalVer: 2026-07-23  SemVer: 1.2.0
 # Status: TEMPLATE — not yet applied. Contains zero secrets.
-# See DNS-Naming-Convention-Decision-Record.md for the Bezos-framed
-# decision this manifest implements (Type 2 / two-way door).
+# Real domain values are supplied only from domains/* overlay branches
+# or via environment variables at apply time.
 
 zone:
-  name: geomesh.net
+  name: "<your-zone.example>"          # placeholder — never commit real apex
   # zone_id is environment-specific; resolve at apply time
   zone_id_env_var: CLOUDFLARE_ZONE_ID
 
 dns_records:
-  - name_env: DOMAIN_LABEL          # default: tinyverse.dev
+  - name_env: DOMAIN_LABEL          # default: example.dev
     type: CNAME
     content_env: VERCEL_CNAME_TARGET # default: cname.vercel-dns.com
     proxied: false                   # REQUIRED false — Vercel does not support Cloudflare-proxied CNAMEs
     ttl: 300
-    comment: "Apex for main branch — canonical tinyverse.dev.geomesh.net"
+    comment: "Apex / canonical environment hostname"
 
-  - name_env: WILDCARD_LABEL        # default: *.tinyverse.dev
+  - name_env: WILDCARD_LABEL        # default: *.example.dev
     type: CNAME
     content_env: VERCEL_CNAME_TARGET
     proxied: false
@@ -26,7 +26,7 @@ dns_records:
 
 vercel_domain_binding:
   project_id_env_var: VERCEL_PROJECT_ID
-  domain_env: FULL_DOMAIN            # default: tinyverse.dev.geomesh.net
+  domain_env: FULL_DOMAIN            # default: example.dev.your-zone.example
   git_branch_env: GIT_BRANCH         # default: main
 
 cloudflare_access:
@@ -45,20 +45,19 @@ required_env_vars_no_defaults:
   - VERCEL_PROJECT_ID
 
 optional_env_vars_with_defaults:
-  DOMAIN_LABEL: tinyverse.dev
-  WILDCARD_LABEL: "*.tinyverse.dev"
+  DOMAIN_LABEL: example.dev
+  WILDCARD_LABEL: "*.example.dev"
   VERCEL_CNAME_TARGET: cname.vercel-dns.com
-  FULL_DOMAIN: tinyverse.dev.geomesh.net
+  FULL_DOMAIN: example.dev.your-zone.example
   GIT_BRANCH: main
 
 single_writer_rule: >
   Only one automation agent (human, Claude, or Grok) should apply this
-  manifest at a time. Check for existing tinyverse.dev* records before
-  writing to avoid duplicate/conflicting CNAMEs.
+  manifest at a time. Check for existing records matching DOMAIN_LABEL /
+  WILDCARD_LABEL before writing to avoid duplicate/conflicting CNAMEs.
 
 ssl_limitations: >
-  Cloudflare Free Universal SSL covers only geomesh.net and *.geomesh.net.
-  It does NOT cover tinyverse.dev.geomesh.net (two labels) or
-  *.tinyverse.dev.geomesh.net (three labels). Rely on Vercel-issued
-  certificates (proxied:false required). True automatic branch wildcards
-  need Advanced Certificate Manager or Vercel nameservers + DNS-01.
+  Cloudflare Free Universal SSL covers only the zone apex and a single-level
+  wildcard (*.your-zone.example). Multi-level names (example.dev.your-zone.example)
+  require Vercel-issued certificates (proxied:false) or Advanced Certificate
+  Manager / DNS-01. See README.md for the recommended grey-cloud strategy.
