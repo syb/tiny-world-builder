@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """provider/cloudflare-dns/apply.py
-CalVer: 2026-07-22  SemVer: 1.1.0
+CalVer: 2026-07-23  SemVer: 1.2.0
 
-Idempotent, env-var-driven applicator for the tinyverse.dev.geomesh.net
-naming convention. Dry-run by default. Requires explicit --apply.
+Idempotent, env-var-driven applicator for domain-agnostic DNS + Vercel binding.
+Dry-run by default. Requires explicit --apply.
 
 Required env:
   CLOUDFLARE_API_TOKEN
@@ -11,11 +11,11 @@ Required env:
   VERCEL_TOKEN
   VERCEL_PROJECT_ID
 
-Optional env (defaults shown):
-  DOMAIN_LABEL=tinyverse.dev
-  WILDCARD_LABEL=*.tinyverse.dev
+Optional env (defaults are placeholders only — override for real use):
+  DOMAIN_LABEL=example.dev
+  WILDCARD_LABEL=*.example.dev
   VERCEL_CNAME_TARGET=cname.vercel-dns.com
-  FULL_DOMAIN=tinyverse.dev.geomesh.net
+  FULL_DOMAIN=example.dev.your-zone.example
   GIT_BRANCH=main
 """
 from __future__ import annotations
@@ -44,7 +44,7 @@ def http_json(method: str, url: str, token: str, body: dict | None = None) -> di
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
-            "User-Agent": "tinyverse-dns-apply/1.1",
+            "User-Agent": "domain-overlay-dns-apply/1.2",
         },
         method=method,
     )
@@ -57,6 +57,7 @@ def http_json(method: str, url: str, token: str, body: dict | None = None) -> di
 
 
 def cf_list_records(zone_id: str, token: str, name: str) -> list[dict]:
+    """List DNS records whose name matches exactly (supports wildcards)."""
     url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?name={name}&per_page=50"
     result = http_json("GET", url, token)
     if not result.get("success"):
@@ -84,7 +85,7 @@ def vercel_add_domain(project_id: str, token: str, domain: str, git_branch: str)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Apply Cloudflare DNS + Vercel domain binding")
+    parser = argparse.ArgumentParser(description="Apply Cloudflare DNS + Vercel domain binding (domain-agnostic)")
     parser.add_argument("--apply", action="store_true", help="Actually perform writes (default is dry-run)")
     args = parser.parse_args()
     dry_run = not args.apply
@@ -94,13 +95,14 @@ def main() -> None:
     vercel_token = env("VERCEL_TOKEN", required=True)
     vercel_project = env("VERCEL_PROJECT_ID", required=True)
 
-    domain_label = env("DOMAIN_LABEL", "tinyverse.dev")
-    wildcard_label = env("WILDCARD_LABEL", "*.tinyverse.dev")
+    # Placeholders only — real values supplied via env or domains/* overlay
+    domain_label = env("DOMAIN_LABEL", "example.dev")
+    wildcard_label = env("WILDCARD_LABEL", "*.example.dev")
     cname_target = env("VERCEL_CNAME_TARGET", "cname.vercel-dns.com")
-    full_domain = env("FULL_DOMAIN", "tinyverse.dev.geomesh.net")
+    full_domain = env("FULL_DOMAIN", "example.dev.your-zone.example")
     git_branch = env("GIT_BRANCH", "main")
 
-    print("=== Cloudflare DNS + Vercel Domain Binding ===")
+    print("=== Cloudflare DNS + Vercel Domain Binding (domain-agnostic) ===")
     print(f"Mode          : {'DRY-RUN (no changes)' if dry_run else 'APPLY'}")
     print(f"Zone ID       : {zone_id}")
     print(f"CNAME target  : {cname_target}")
@@ -116,14 +118,13 @@ def main() -> None:
         return
 
     # --- Cloudflare CNAMEs ---
+    # Use the label exactly as supplied. Cloudflare accepts both relative
+    # names and FQDNs; wildcards are stored with the leading *.
     for label, comment in [
-        (domain_label, "Apex for main — canonical tinyverse.dev.geomesh.net"),
+        (domain_label, "Apex / canonical environment hostname"),
         (wildcard_label, "Wildcard for future branch previews"),
     ]:
-        existing = cf_list_records(zone_id, cf_token, label if not label.startswith("*") else label)
-        # Cloudflare name for wildcard is stored without the leading *.
-        lookup_name = label.lstrip("*") if label.startswith("*") else label
-        existing = cf_list_records(zone_id, cf_token, f"{lookup_name}.geomesh.net" if "." not in lookup_name else lookup_name)
+        existing = cf_list_records(zone_id, cf_token, label)
         if existing:
             print(f"EXISTS  {label} → already present, skipping create")
         else:

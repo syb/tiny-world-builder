@@ -1,22 +1,24 @@
-# Cloudflare DNS IaC — tinyverse.dev.geomesh.net
+# Cloudflare DNS IaC — domain-agnostic template
 
-Companion to the DNS Naming Convention Decision Record (Bezos Type-2).
+Companion to ADR-0001 / ADR-0002 and the DNS Naming Convention Decision Record (Bezos Type-2).
 
 ## Purpose
 
-Declarative, secret-free infrastructure-as-code for the environment-first
-naming pattern:
+Declarative, secret-free infrastructure-as-code for an environment-first
+naming pattern. Real domain values are **never** committed on `main`; they
+are supplied at apply time via environment variables or from a `domains/*`
+overlay branch.
 
-| Branch / environment | URL |
-|----------------------|-----|
-| `main` | `https://tinyverse.dev.geomesh.net` |
-| any other branch | `https://<sanitised-branch>.tinyverse.dev.geomesh.net` |
+| Branch / environment | Example URL (illustrative only) |
+|----------------------|---------------------------------|
+| `main` | `https://example.dev.your-zone.example` |
+| any other branch | `https://<sanitised-branch>.example.dev.your-zone.example` |
 
 ## Contents
 
 | File | Role |
 |------|------|
-| `records.yaml` | Declarative manifest (no secrets) |
+| `records.yaml` | Declarative manifest (no secrets, placeholder defaults) |
 | `apply.py` | Preferred applicator — env-var driven, dry-run by default, idempotent |
 | `apply.sh` | Thin wrapper / historical reference |
 | `README.md` | This file |
@@ -25,18 +27,18 @@ naming pattern:
 
 ```bash
 export CLOUDFLARE_API_TOKEN=...
-export CLOUDFLARE_ZONE_ID=737ef273e937a29b8baf60633359cb11   # geomesh.net
+export CLOUDFLARE_ZONE_ID=...          # from your Cloudflare zone
 export VERCEL_TOKEN=...
-export VERCEL_PROJECT_ID=...   # tiny-world-builder_upstream_main
+export VERCEL_PROJECT_ID=...           # target Vercel project
 ```
 
-Optional overrides (defaults shown):
+Optional overrides (defaults are pure placeholders):
 
 ```bash
-DOMAIN_LABEL=tinyverse.dev
-WILDCARD_LABEL=*.tinyverse.dev
+DOMAIN_LABEL=example.dev
+WILDCARD_LABEL=*.example.dev
 VERCEL_CNAME_TARGET=cname.vercel-dns.com
-FULL_DOMAIN=tinyverse.dev.geomesh.net
+FULL_DOMAIN=example.dev.your-zone.example
 GIT_BRANCH=main
 ```
 
@@ -46,39 +48,30 @@ GIT_BRANCH=main
 # Dry-run (default)
 python3 apply.py
 
-# Apply for real
+# Apply for real (only after single-writer confirmation)
 python3 apply.py --apply
 ```
 
 ## Single-writer rule
 
-Both Claude and Grok currently hold live Cloudflare credentials on this
-account. Only **one** agent may apply this manifest at a time. Always list
-existing `tinyverse.dev*` records before writing.
+Multiple agents may hold live Cloudflare credentials. Only **one** agent may
+apply this manifest at a time. Always list existing records matching
+DOMAIN_LABEL / WILDCARD_LABEL before writing. Prefer the GitHub Actions
+workflow (issue #3) which enforces concurrency by domain.
 
 ## SSL / Certificate limitations (important)
 
-Cloudflare Free Universal SSL covers only:
-- `geomesh.net`
-- `*.geomesh.net`
+Cloudflare Free Universal SSL covers only the zone apex and a single-level
+wildcard (`*.your-zone.example`). Multi-level names require either:
 
-It does **not** cover:
-- `tinyverse.dev.geomesh.net` (two labels deep)
-- `*.tinyverse.dev.geomesh.net` (three labels deep)
+1. Keep CNAMEs `proxied: false` (grey-cloud) and let Vercel issue certificates, or
+2. Cloudflare Advanced Certificate Manager + DNS-01, or
+3. Move nameservers to Vercel.
 
-**Practical strategy:**
-1. Keep all CNAMEs `proxied: false` (grey-cloud).
-2. Let Vercel issue the certificates (works for the apex after the domain is
-   added in the Vercel project).
-3. Branch previews can continue to use native `*.vercel.app` URLs until a
-   more advanced setup (Cloudflare Advanced Certificate Manager or Vercel
-   nameservers + DNS-01) is justified.
-
-True automatic multi-level wildcards require either:
-- Moving the zone nameservers to Vercel, or
-- Cloudflare Advanced Certificate Manager + manual/automatic DNS-01 challenges.
+**Recommended for the first milestone:** grey-cloud + Vercel-managed certs.
 
 ## Status
 
-Template only as of 2026-07-22. No live records have been created by this
-commit. Apply deliberately after human review.
+Template only. No live records are created by commits on `main`. Real values
+and apply runs happen exclusively from `domains/*` overlay branches under the
+single-writer rule.
