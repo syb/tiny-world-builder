@@ -1,0 +1,63 @@
+# provider/cloudflare-dns — declarative manifest
+# CalVer: 2026-07-23  SemVer: 1.2.0
+# Status: TEMPLATE — not yet applied. Contains zero secrets.
+# Real domain values are supplied only from domains/* overlay branches
+# or via environment variables at apply time.
+
+zone:
+  name: "<your-zone.example>"          # placeholder — never commit real apex
+  # zone_id is environment-specific; resolve at apply time
+  zone_id_env_var: CLOUDFLARE_ZONE_ID
+
+dns_records:
+  - name_env: DOMAIN_LABEL          # default: example.dev
+    type: CNAME
+    content_env: VERCEL_CNAME_TARGET # default: cname.vercel-dns.com
+    proxied: false                   # REQUIRED false — Vercel does not support Cloudflare-proxied CNAMEs
+    ttl: 300
+    comment: "Apex / canonical environment hostname"
+
+  - name_env: WILDCARD_LABEL        # default: *.example.dev
+    type: CNAME
+    content_env: VERCEL_CNAME_TARGET
+    proxied: false
+    ttl: 300
+    comment: "Wildcard — enables future per-branch preview subdomains"
+
+vercel_domain_binding:
+  project_id_env_var: VERCEL_PROJECT_ID
+  domain_env: FULL_DOMAIN            # default: example.dev.your-zone.example
+  git_branch_env: GIT_BRANCH         # default: main
+
+cloudflare_access:
+  status: not_yet_created
+  hostname_env: FULL_DOMAIN
+  policies:
+    - name: admin-power-tier
+      identity_provider: google_workspace
+    - name: free-tier
+      identity_provider: cloudflare_one_time_pin
+
+required_env_vars_no_defaults:
+  - CLOUDFLARE_API_TOKEN
+  - CLOUDFLARE_ZONE_ID
+  - VERCEL_TOKEN
+  - VERCEL_PROJECT_ID
+
+optional_env_vars_with_defaults:
+  DOMAIN_LABEL: example.dev
+  WILDCARD_LABEL: "*.example.dev"
+  VERCEL_CNAME_TARGET: cname.vercel-dns.com
+  FULL_DOMAIN: example.dev.your-zone.example
+  GIT_BRANCH: main
+
+single_writer_rule: >
+  Only one automation agent (human, Claude, or Grok) should apply this
+  manifest at a time. Check for existing records matching DOMAIN_LABEL /
+  WILDCARD_LABEL before writing to avoid duplicate/conflicting CNAMEs.
+
+ssl_limitations: >
+  Cloudflare Free Universal SSL covers only the zone apex and a single-level
+  wildcard (*.your-zone.example). Multi-level names (example.dev.your-zone.example)
+  require Vercel-issued certificates (proxied:false) or Advanced Certificate
+  Manager / DNS-01. See README.md for the recommended grey-cloud strategy.
