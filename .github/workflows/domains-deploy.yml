@@ -1,0 +1,199 @@
+name: Domains Deploy
+
+# Guarded deployment path for private domain overlays.
+# See ADR-0002 (overlay strategy) and ADR-0003 (deployment guards).
+# Tracking: issue #3
+
+on:
+  push:
+    branches:
+      - 'domains/**'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Run live apply (requires Environment approval)'
+        type: boolean
+        default: false
+
+# Single-writer enforcement: only one run per domain at a time.
+# Branch name domains/geomesh.net → group domains-geomesh.net
+concurrency:
+  group: domains-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1. Extract target domain from the branch name and sanity-check
+  # ------------------------------------------------------------------
+  preflight:
+    name: Preflight (domain extraction + dry-run)
+    runs-on: ubuntu-latest
+    outputs:
+      domain: ${{ steps.extract.outputs.domain }}
+      can_apply: ${{ steps.extract.outputs.can_apply }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract domain from branch name
+        id: extract
+        run: |
+          set -euo pipefail
+          REF="${{ github.ref_name }}"
+          # domains/geomesh.net        → geomesh.net
+          # domains/geomesh.net/staging → geomesh.net (environment is informational)
+          if [[ "$REF" != domains/* ]]; then
+            echo "Not a domains/* branch — skipping"
+            echo "domain=" >> "$GITHUB_OUTPUT"
+            echo "can_apply=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Strip leading "domains/" then take the first path segment as the apex
+          DOMAIN="${REF#domains/}"
+          DOMAIN="${DOMAIN%%/*}"
+          if [[ -z "$DOMAIN" || "$DOMAIN" == *" "* ]]; then
+            echo "::error::Could not extract a valid domain from branch '$REF'"
+            exit 1
+          fi
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+          echo "can_apply=true" >> "$GITHUB_OUTPUT"
+          echo "Target domain: $DOMAIN (from branch $REF)"
+
+      - name: Setup Python
+        if: steps.extract.outputs.can_apply == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Dry-run apply.py (no secrets required for syntax/logic check)
+        if: steps.extract.outputs.can_apply == 'true'
+        env:
+          # Placeholder values so the script can parse and exit cleanly in dry-run.
+          # Real secrets are only injected in the apply job below.
+          CLOUDFLARE_API_TOKEN: dry-run-token
+          CLOUDFLARE_ZONE_ID: dry-run-zone
+          VERCEL_TOKEN: dry-run-token
+          VERCEL_PROJECT_ID: dry-run-project
+          DOMAIN_LABEL: example.dev
+          WILDCARD_LABEL: "*.example.dev"
+          FULL_DOMAIN: example.dev.${{ steps.extract.outputs.domain }}
+          GIT_BRANCH: main
+        run: |
+          set -euo pipefail
+          python3 provider/cloudflare-dns/apply.py
+          echo "Dry-run completed successfully."
+
+  # ------------------------------------------------------------------
+  # 2. Live apply — gated by GitHub Environment "domain-deploy"
+  #    Create the Environment in repo Settings → Environments and
+  #    optionally require reviewers. Secrets must be configured there
+  #    or as repository secrets with the names below.
+  # ------------------------------------------------------------------
+  apply:
+    name: Apply (Cloudflare DNS + Vercel domain)
+    needs: preflight
+    if: |
+      needs.preflight.outputs.can_apply == 'true' &&
+      (github.event_name == 'push' || github.event.inputs.apply == 'true')
+    runs-on: ubuntu-latest
+    environment: domain-deploy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Confirm required secrets are present
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ZONE: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          V_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          V_PROJECT: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in CF_TOKEN CF_ZONE V_TOKEN V_PROJECT; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing required secret: $name"
+              missing=1
+            fi
+          done
+          if [[ $missing -eq 1 ]]; then
+            echo "Configure the secrets on the 'domain-deploy' Environment (or repository secrets)."
+            exit 1
+          fi
+          echo "All required secrets are present."
+
+      - name: Live apply
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          # Domain-specific values — override via Environment variables
+          # or repository variables named after the domain if desired.
+          # Defaults shown here; set DOMAIN_LABEL / FULL_DOMAIN etc. on the
+          # Environment for the real geomesh.net overlay.
+          DOMAIN_LABEL: ${{ vars.DOMAIN_LABEL || 'tinyverse.dev' }}
+          WILDCARD_LABEL: ${{ vars.WILDCARD_LABEL || '*.tinyverse.dev' }}
+          VERCEL_CNAME_TARGET: ${{ vars.VERCEL_CNAME_TARGET || 'cname.vercel-dns.com' }}
+          FULL_DOMAIN: ${{ vars.FULL_DOMAIN || format('tinyverse.dev.{0}', needs.preflight.outputs.domain) }}
+          GIT_BRANCH: ${{ vars.GIT_BRANCH || 'main' }}
+        run: |
+          set -euo pipefail
+          echo "SINGLE-WRITER: concurrency group domains-${{ github.ref_name }} is active."
+          echo "Applying for domain ${{ needs.preflight.outputs.domain }}"
+          python3 provider/cloudflare-dns/apply.py --apply
+
+  # ------------------------------------------------------------------
+  # 3. Post-deploy verification (DNS + HTTPS)
+  # ------------------------------------------------------------------
+  verify:
+    name: Verify DNS + HTTPS
+    needs: [preflight, apply]
+    if: needs.apply.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for DNS propagation (bounded)
+        env:
+          FULL_DOMAIN: ${{ vars.FULL_DOMAIN || format('tinyverse.dev.{0}', needs.preflight.outputs.domain) }}
+        run: |
+          set -euo pipefail
+          echo "Checking CNAME for $FULL_DOMAIN …"
+          # Bounded retry: 12 × 10 s = 2 min max
+          for i in $(seq 1 12); do
+            if dig +short CNAME "$FULL_DOMAIN" | grep -qi 'vercel\|cname'; then
+              echo "DNS CNAME resolved:"
+              dig +short CNAME "$FULL_DOMAIN"
+              exit 0
+            fi
+            echo "Attempt $i/12 — not yet visible, sleeping 10s"
+            sleep 10
+          done
+          echo "::warning::DNS CNAME not yet visible after ~2 min. Continuing to HTTPS check."
+
+      - name: HTTPS reachability + certificate check
+        env:
+          FULL_DOMAIN: ${{ vars.FULL_DOMAIN || format('tinyverse.dev.{0}', needs.preflight.outputs.domain) }}
+        run: |
+          set -euo pipefail
+          URL="https://$FULL_DOMAIN/"
+          echo "Probing $URL …"
+          # Allow up to 90 s for Vercel certificate issuance
+          for i in $(seq 1 9); do
+            if curl -fsSL --max-time 15 -o /dev/null -w "%{http_code}" "$URL" | grep -qE '^(200|301|302|308)$'; then
+              echo "HTTPS reachable."
+              # Show certificate subject / issuer for audit trail
+              echo | openssl s_client -servername "$FULL_DOMAIN" -connect "$FULL_DOMAIN:443" 2>/dev/null \
+                | openssl x509 -noout -subject -issuer -dates || true
+              exit 0
+            fi
+            echo "Attempt $i/9 — not ready, sleeping 10s"
+            sleep 10
+          done
+          echo "::error::HTTPS still unreachable after ~90 s. Check Vercel domain binding and certificate status."
+          exit 1
